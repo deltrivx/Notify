@@ -63,6 +63,58 @@ class ProjectError(Exception):
     pass
 
 
+def _run_custom_sql(path: str, spec: Any) -> str:
+    """执行项目级自定义 SQL（只读），返回格式化表格文本。
+
+    spec 形如：
+      {"sql": "SELECT domains, end_day FROM cert", "header": ["域名","剩余天数"]}
+
+    安全约束：
+      - 仅允许单条 SELECT（禁止 ; 多语句与写操作）
+      - 只读打开数据库
+      - 输出统一脱敏
+    """
+    if not isinstance(spec, dict):
+        return "自定义查询配置格式错误"
+    sql = str(spec.get("sql", "")).strip()
+    header = spec.get("header") or []
+    if not sql:
+        return "自定义查询缺少 sql"
+    low = sql.lower()
+    if not low.startswith("select"):
+        return "自定义查询只允许 SELECT"
+    if ";" in sql:
+        return "自定义查询禁止多语句"
+    if not os.path.exists(path):
+        raise ProjectError(f"数据库不存在: {path}")
+
+    try:
+        uri = f"file:{path}?mode=ro"
+        conn = sqlite3.connect(uri, uri=True, timeout=5)
+        rows = conn.execute(sql).fetchall()
+        cols = [d[0] for d in conn.description] if conn.description else []
+        conn.close()
+    except Exception as exc:  # noqa: BLE001
+        raise ProjectError(f"查询失败: {exc}") from exc
+
+    if not rows:
+        return "（无数据）"
+
+    title = header if isinstance(header, list) and header else cols
+    lines = []
+    for r in rows:
+        vals = []
+        for v in r:
+            v = _redact(v)
+            s = str(v)
+            # 单元格截断，避免 PEM 之类超长内容刷屏
+            if len(s) > 60:
+                s = s[:57] + "..."
+            vals.append(s)
+        lines.append(" | ".join("%s: %s" % (title[i] if i < len(title) else cols[i] if i < len(cols) else "?", vals[i]) for i in range(len(vals))))
+    return "\n".join(lines)
+
+
 def _dechunk(data: bytes) -> bytes:
     """解析 HTTP chunked 响应体（iStoreOS CGI 返回 chunked，体前会带长度前缀如 2A3）。"""
     out = b""
@@ -205,6 +257,13 @@ def run_query(project: dict, command: str) -> str:
 
     stype = project.get("source_type", "none")
     path = project.get("source_path", "")
+
+    # 项目级自定义 SQL 优先：让「证书」返回可读列表，而不是整表 dump
+    # （通用 dump 会把 PEM 证书全文、access 凭据表一起吐出来，内容又长又乱）
+    queries = project.get("queries") or {}
+    if isinstance(queries, dict) and command in queries:
+        return _run_custom_sql(path, queries[command])
+
     try:
         if stype == "file":
             return _read_file(path)
