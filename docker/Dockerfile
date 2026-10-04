@@ -14,7 +14,6 @@ COPY app/requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
 COPY app/ /app/
-COPY scripts/ /app/scripts/
 
 # 配置与数据目录（由 compose/run 挂载）
 RUN mkdir -p /config /data
