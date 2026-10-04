@@ -94,6 +94,8 @@ def start_project_server(project: dict, token: str):
         {"project": project, "token": token},
     )
     try:
+        # allow_reuse_address：避免容器重启时 TIME_WAIT 导致端口占用失败
+        HTTPServer.allow_reuse_address = True
         srv = HTTPServer(("0.0.0.0", int(port)), handler)
     except OSError as exc:
         print(f"[notify] 端口 {port} 启动失败: {exc}", flush=True)
@@ -138,3 +140,134 @@ def api_config():
     tok = safe.get("global", {}).get("relay_push_token", "")
     safe["global"]["relay_push_token"] = f"<set:{len(tok)}>" if tok else "<unset>"
     return safe
+
+
+@app.post("/api/global")
+async def api_global(request: Request):
+    """更新全局设置（表单提交）。令牌留空表示不修改。"""
+    form = await request.form()
+    c = cfg()
+    g = c.setdefault("global", {})
+    for key in ("relay_host", "relay_push_token", "wecom_corpid", "wecom_agentid",
+                "wecom_secret", "min_importance", "language", "timezone"):
+        if key in form and str(form[key]).strip():
+            g[key] = str(form[key]).strip()
+    for key in ("relay_port", "enable_notify", "enable_cmd"):
+        if key in form:
+            raw = str(form[key]).strip()
+            if key == "relay_port":
+                g[key] = int(raw) if raw.isdigit() else g.get(key)
+            else:
+                g[key] = raw.lower() in ("1", "true", "yes", "on")
+    config_store.save(c)
+    return {"ok": True}
+
+
+@app.post("/api/projects")
+async def api_projects_add(request: Request):
+    """新增/更新项目实例（按 name 幂等）。"""
+    form = await request.form()
+    name = str(form.get("name", "")).strip()
+    if not name:
+        return JSONResponse({"ok": False, "error": "缺少项目名"}, status_code=400)
+
+    project = {
+        "name": name,
+        "kind": str(form.get("kind", "")).strip() or "custom",
+        "source_type": str(form.get("source_type", "none")).strip(),
+        "source_path": str(form.get("source_path", "")).strip(),
+        "commands": {"状态": "查询", "帮助": "列出指令"},
+    }
+    port = str(form.get("port", "")).strip()
+    project["port"] = int(port) if port.isdigit() else None
+
+    issues = projects.validate(project)
+    if issues:
+        return JSONResponse({"ok": False, "error": "; ".join(issues)}, status_code=400)
+
+    c = cfg()
+    config_store.upsert_project(c, project)
+    config_store.save(c)
+
+    # 立即尝试拉起该项目的指令服务
+    start_project_server(project, c.get("global", {}).get("relay_push_token", ""))
+    return {"ok": True, "project": name}
+
+
+@app.post("/api/projects/delete")
+async def api_projects_del(request: Request):
+    form = await request.form()
+    name = str(form.get("name", "")).strip()
+    if not name:
+        return JSONResponse({"ok": False, "error": "缺少项目名"}, status_code=400)
+    c = cfg()
+    config_store.remove_project(c, name)
+    config_store.save(c)
+    return {"ok": True, "removed": name}
+
+
+@app.post("/notify")
+async def api_notify(request: Request):
+    """把通知转发到中转服务。占位符未替换时直接报错，避免误连。"""
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        body = {}
+    c = cfg()
+    g = c.get("global", {})
+    host = str(g.get("relay_host", "")).strip()
+    if not host or host == "RELAY_HOST":
+        return JSONResponse(
+            {"ok": False, "error": "未配置中转地址（当前为占位符 RELAY_HOST）"},
+            status_code=400,
+        )
+
+    token = str(g.get("relay_push_token", "")).strip()
+    payload = {
+        "token": token,
+        "title": str(body.get("title", "")),
+        "content": str(body.get("content", "")),
+        "importance": str(body.get("importance", "normal")),
+    }
+    url = "http://%s:%s/notify" % (host, int(g.get("relay_port", 8181)))
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.post(url, json=payload)
+        return {"ok": resp.status_code < 400, "status": resp.status_code}
+    except Exception as exc:  # noqa: BLE001
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=502)
+
+
+# ────────────────────────── 启动入口 ──────────────────────────
+# 之前 main.py 只定义了路由，从未真正启动服务 —— 脚本执行完即退出（ExitCode=0），
+# 在 restart: unless-stopped 下表现为「无限重启」。这里补上真正的启动逻辑。
+
+
+def bootstrap() -> None:
+    c = cfg()
+    token = str(c.get("global", {}).get("relay_push_token", "") or "")
+    enabled = bool(c.get("global", {}).get("enable_cmd", True))
+    if not enabled:
+        print("[notify] 交互总开关关闭，不起项目指令服务", flush=True)
+        return
+    for project in c.get("projects", []):
+        issues = projects.validate(project)
+        if issues:
+            print(
+                "[notify] 跳过项目 %s: %s" % (project.get("name"), "; ".join(issues)),
+                flush=True,
+            )
+            continue
+        start_project_server(project, token)
+
+
+def main() -> None:
+    import uvicorn
+
+    bootstrap()
+    print(f"[notify] 管理界面监听 :{MANAGE_PORT}", flush=True)
+    uvicorn.run(app, host="0.0.0.0", port=MANAGE_PORT, log_level="info")
+
+
+if __name__ == "__main__":
+    main()
