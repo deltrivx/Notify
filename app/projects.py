@@ -104,14 +104,32 @@ def _read_sqlite(path: str, limit: int = 20) -> str:
         raise ProjectError(f"查询失败: {exc}") from exc
 
 
-def _read_http(url: str, timeout: int = 8) -> str:
+def _read_http(url: str, command: str = "", timeout: int = 8) -> str:
     import httpx
 
     if "RELAY_HOST" in url:
         raise ProjectError("请先配置中转地址（当前为占位符 RELAY_HOST）")
+    # 支持 {cmd} 占位符：把指令名注入 URL，避免只能硬编码单条指令
+    # （iStoreOS 的 CGI API 形如 ?cmd=状态，不同指令需不同参数）
+    if "{cmd}" in url:
+        from urllib.parse import quote
+
+        url = url.replace("{cmd}", quote(command or ""))
     try:
         resp = httpx.get(url, timeout=timeout, follow_redirects=True)
-        return f"HTTP {resp.status_code}\n{_redact(resp.text[:2000])}"
+        text = resp.text[:4000]
+        # JSON 接口优先取 result 字段（iStoreOS 返回 {"ok":..,"result":".."}）
+        try:
+            import json as _json
+
+            data = _json.loads(text)
+            if isinstance(data, dict) and "result" in data:
+                return _redact(str(data.get("result", "")))
+            if isinstance(data, dict) and data.get("ok") is False:
+                return f"接口返回错误: {data.get('err', '未知')}"
+        except Exception:
+            pass
+        return f"HTTP {resp.status_code}\n{_redact(text[:2000])}"
     except Exception as exc:  # noqa: BLE001
         raise ProjectError(f"请求失败: {exc}") from exc
 
@@ -137,7 +155,7 @@ def run_query(project: dict, command: str) -> str:
         if stype == "sqlite":
             return _read_sqlite(path)
         if stype == "http":
-            return _read_http(path)
+            return _read_http(path, command)
         if stype == "none":
             return "该项目无数据源（仅通知）"
         raise ProjectError(f"不支持的数据源类型: {stype}")
