@@ -126,7 +126,15 @@ def render(cfg: dict, message: str = "", ok: bool = True) -> str:
 
     def tok_ph(k):
         v = str(g.get(k, "") or "")
-        return f"已设置（{len(v)} 位，留空保持不变）" if v else "例如 RELAY_PUSH_TOKEN"
+        return f"已设置（{len(v)} 位，显示 *** 表示保持不变；要修改请输入新值）" if v else "例如 RELAY_PUSH_TOKEN"
+
+    def tok_val(k):
+        """已配置的敏感字段显示为 ***（避免看起来像没配）。
+
+        注意：不能把真实值放进页面；保存端会把纯星号视为「保持不变」忽略掉。
+        """
+        v = str(g.get(k, "") or "")
+        return "***" if v else ""
 
     def checked(k):
         return " checked" if bool(g.get(k, True)) else ""
@@ -144,7 +152,8 @@ def render(cfg: dict, message: str = "", ok: bool = True) -> str:
         st_opts = "".join(
             f'<option value="{_esc(s)}"{_opt(s, cur_st)}>{_esc(s)}</option>' for s in SOURCE_TYPES
         )
-        tok_hint = f"已设置（{len(ptok)} 位，留空保持不变）" if ptok else "可选，留空则用全局令牌"
+        tok_hint = f"已设置（{len(ptok)} 位，显示 *** 表示保持不变；要改请输入新值）" if ptok else "可选，留空则用全局令牌"
+        tok_show = "***" if ptok else ""
         rows.append(f"""
       <div class="card">
         <div class="card-h"><b>{name}</b><span class="tag">{_esc(p.get("kind", ""))}</span></div>
@@ -158,7 +167,7 @@ def render(cfg: dict, message: str = "", ok: bool = True) -> str:
         <label>数据源路径 / URL
           <input name="source_path" value="{_esc(p.get("source_path", ""))}"></label>
         <label>项目级令牌（可选，覆盖全局）
-          <input type="password" name="token" placeholder="{_esc(tok_hint)}"></label>
+          <input type="password" name="token" value="{_esc(tok_show)}" placeholder="{_esc(tok_hint)}"></label>
         <label>命令（YAML：指令名: 说明）
           <textarea name="commands_yaml" rows="5">{_esc(_yaml_of(p.get("commands") or {}))}</textarea>
         </label>
@@ -200,13 +209,13 @@ def render(cfg: dict, message: str = "", ok: bool = True) -> str:
 <label>中转端口
 <input name="relay_port" value="{val("relay_port", "8181")}" inputmode="numeric"></label>
 <label>共享令牌
-<input type="password" name="relay_push_token" placeholder="{_esc(tok_ph("relay_push_token"))}"></label>
+<input type="password" name="relay_push_token" value="{_esc(tok_val("relay_push_token"))}" placeholder="{_esc(tok_ph("relay_push_token"))}"></label>
 <label>企微 CorpID（可选）
 <input name="wecom_corpid" value="{val("wecom_corpid")}"></label>
 <label>企微 AgentID（可选）
 <input name="wecom_agentid" value="{val("wecom_agentid")}"></label>
 <label>企微 Secret（可选）
-<input type="password" name="wecom_secret" placeholder="{_esc(tok_ph("wecom_secret"))}"></label>
+<input type="password" name="wecom_secret" value="{_esc(tok_val("wecom_secret"))}" placeholder="{_esc(tok_ph("wecom_secret"))}"></label>
 <label><input type="checkbox" name="enable_notify"{checked("enable_notify")}> 启用通知</label>
 <label><input type="checkbox" name="enable_cmd"{checked("enable_cmd")}> 启用交互指令</label>
 <label>最低通知级别

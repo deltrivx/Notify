@@ -210,11 +210,11 @@ async def api_global(request: Request):
                 "language", "timezone"):
         if key in body and str(body[key]).strip():
             g[key] = str(body[key]).strip()
-    # 令牌类：留空保持不变（防清空）
+    # 令牌类：留空 或 纯星号 = 保持不变（面板用 *** 表示已配置，不能把星号当成真值存进去）
     for key in ("relay_push_token", "wecom_secret"):
         if key in body:
             raw = str(body.get(key) or "").strip()
-            if raw and not raw.startswith("<set:"):
+            if raw and not raw.startswith("<set:") and set(raw) != {"*"}:
                 g[key] = raw
     if "relay_port" in body:
         raw = str(body["relay_port"]).strip()
@@ -253,7 +253,8 @@ async def api_projects_add(request: Request):
     if qs:
         project["queries"] = qs
     tok_raw = str(body.get("token") or "").strip()
-    if tok_raw:
+    # 面板用 *** 表示「已配置、保持不变」，不能把星号当真值存进去
+    if tok_raw and set(tok_raw) != {"*"}:
         project["token"] = tok_raw
     project["port"] = int(port_raw) if port_raw.isdigit() else None
 
