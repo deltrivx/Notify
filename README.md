@@ -1,5 +1,9 @@
 # Notify
 
+<p align="center">
+  <img src="assets/logo-512.png" alt="Notify" width="128" />
+</p>
+
 **Notify：Unraid 多项目通知与交互中枢容器。**
 
 把散落在 Unraid 上的「通知 / 交互」脚本（如 `ddns-cmd`、`allinssl-cmd` 之类）收编进一个独立容器，做到：
