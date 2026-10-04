@@ -1,0 +1,24 @@
+# Notify — 多项目通知与交互中枢
+#
+# 用法：
+#   docker compose -f docker/docker-compose.yml up -d
+#
+# 按需挂载数据源（只读）。以下路径为示例，请按实际调整。
+
+services:
+  notify:
+    image: ghcr.io/deltrivx/notify:latest
+    container_name: notify
+    restart: unless-stopped
+    # host 网络：保持各项目端口（8283/8285/...）与既有 frp 隧道一致，
+    # 这样 frpc / VPS / 企微侧无需任何改动。
+    network_mode: host
+    environment:
+      - CONFIG_DIR=/config
+      - DATA_DIR=/data
+      - MANAGE_PORT=8188
+    volumes:
+      - ${NOTIFY_CONFIG:-/mnt/user/appdata/notify/config}:/config
+      # 数据源：全部只读，不写回原容器
+      - /mnt/user/appdata/ddns-go/data/.ddns_go_config.yaml:/data/ddns_go_config.yaml:ro
+      - /mnt/user/appdata/allinssl/data.db:/data/allinssl.db:ro

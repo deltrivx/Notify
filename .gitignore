@@ -1,0 +1,15 @@
+# 本地构建产物与缓存
+dist/
+build/
+__pycache__/
+*.pyc
+
+# 编辑器/系统
+.vscode/
+.idea/
+.DS_Store
+
+# 本地覆盖配置（含真实凭据，不得提交）
+*.local.yaml
+config.local.yaml
+.env
