@@ -9,8 +9,54 @@
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
 from typing import Any
+
+# 敏感字段名：出现在这些键中的值一律脱敏，绝不外发
+# （实测 allinssl 的 access 表存有 Cloudflare api_key、腾讯云 secret_key，
+#   通用查询会把它们原样返回并推送到企微 —— 必须拦住）
+SENSITIVE_KEYS = (
+    "api_key", "apikey", "secret", "token", "password", "passwd",
+    "private_key", "access_key", "secret_id", "secretid",
+    "credential", "authorization", "cookie", "session",
+)
+
+
+def _redact(obj: Any) -> Any:
+    """递归脱敏：命中敏感键的值替换为 ***。"""
+    if isinstance(obj, dict):
+        out = {}
+        for k, v in obj.items():
+            kl = str(k).lower()
+            if any(s in kl for s in SENSITIVE_KEYS):
+                out[k] = "***"
+            else:
+                out[k] = _redact(v)
+        return out
+    if isinstance(obj, list):
+        return [_redact(x) for x in obj]
+    if isinstance(obj, str):
+        # 字符串内嵌的 JSON（如 config 列）也要脱敏
+        if "{" in obj and ":" in obj:
+            try:
+                import json as _json
+
+                parsed = _json.loads(obj)
+                if isinstance(parsed, (dict, list)):
+                    return _json.dumps(_redact(parsed), ensure_ascii=False)
+            except Exception:
+                pass
+            # 非严格 JSON：用正则兜住 key":"value" 形态
+            for s in SENSITIVE_KEYS:
+                obj = re.sub(
+                    r'("%s"\s*:\s*)"[^"]*"' % re.escape(s),
+                    r'\1"***"',
+                    obj,
+                    flags=re.IGNORECASE,
+                )
+        return obj
+    return obj
 
 
 class ProjectError(Exception):
@@ -22,7 +68,7 @@ def _read_file(path: str, limit: int = 4000) -> str:
         raise ProjectError(f"数据源不存在: {path}")
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as fh:
-            return fh.read(limit)
+            return _redact(fh.read(limit))
     except Exception as exc:  # noqa: BLE001
         raise ProjectError(f"读取失败: {exc}") from exc
 
@@ -48,7 +94,8 @@ def _read_sqlite(path: str, limit: int = 20) -> str:
                 rows = conn.execute(f'SELECT * FROM "{t}" LIMIT ?', (limit,)).fetchall()
                 lines.append(f"\n[{t}] {len(rows)} 行")
                 for row in rows[:3]:
-                    lines.append("  " + str(dict(row))[:200])
+                    # 脱敏后再输出：命中敏感键的值替换为 ***
+                    lines.append("  " + str(_redact(dict(row)))[:200])
             except Exception:
                 continue
         conn.close()
@@ -64,7 +111,7 @@ def _read_http(url: str, timeout: int = 8) -> str:
         raise ProjectError("请先配置中转地址（当前为占位符 RELAY_HOST）")
     try:
         resp = httpx.get(url, timeout=timeout, follow_redirects=True)
-        return f"HTTP {resp.status_code}\n{resp.text[:2000]}"
+        return f"HTTP {resp.status_code}\n{_redact(resp.text[:2000])}"
     except Exception as exc:  # noqa: BLE001
         raise ProjectError(f"请求失败: {exc}") from exc
 
