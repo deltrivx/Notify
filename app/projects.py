@@ -63,6 +63,65 @@ class ProjectError(Exception):
     pass
 
 
+def _dechunk(data: bytes) -> bytes:
+    """解析 HTTP chunked 响应体（iStoreOS CGI 返回 chunked，体前会带长度前缀如 2A3）。"""
+    out = b""
+    while data:
+        line, _, rest = data.partition(b"\r\n")
+        try:
+            size = int(line.split(b";")[0].strip(), 16)
+        except (ValueError, IndexError):
+            break
+        if size == 0:
+            break
+        out += rest[:size]
+        data = rest[size + 2:]
+    return out
+
+
+def _raw_get_utf8(url: str, timeout: int = 8) -> str:
+    """用原始 UTF-8 字节发送 GET（不做百分号编码），并解析 chunked 响应。
+
+    实测：iStoreOS 的 CGI 不解码 %XX —— 发 ?cmd=%E7%8A%B6%E6%80%81 时，
+    服务端把它当成指令名返回「未知指令：%E7%8A%B6%E6%80%81」；
+    必须直接发送中文原始字节才能正确识别（与 curl 行为一致）。
+    """
+    import socket
+
+    from urllib.parse import urlsplit
+
+    p = urlsplit(url)
+    host = p.hostname or ""
+    port = p.port or 80
+    path = p.path or "/"
+    if p.query:
+        path = path + "?" + p.query
+
+    req = (
+        "GET %s HTTP/1.1\r\n"
+        "Host: %s\r\n"
+        "Connection: close\r\n"
+        "Accept: application/json, text/plain\r\n"
+        "\r\n" % (path, host)
+    )
+    s = socket.create_connection((host, port), timeout=timeout)
+    try:
+        s.sendall(req.encode("utf-8"))
+        buf = b""
+        while True:
+            chunk = s.recv(8192)
+            if not chunk:
+                break
+            buf += chunk
+    finally:
+        s.close()
+
+    head, _, body = buf.partition(b"\r\n\r\n")
+    if b"transfer-encoding: chunked" in head.lower():
+        body = _dechunk(body)
+    return body.decode("utf-8", "replace")
+
+
 def _read_file(path: str, limit: int = 4000) -> str:
     if not os.path.exists(path):
         raise ProjectError(f"数据源不存在: {path}")
@@ -105,19 +164,16 @@ def _read_sqlite(path: str, limit: int = 20) -> str:
 
 
 def _read_http(url: str, command: str = "", timeout: int = 8) -> str:
-    import httpx
-
     if "RELAY_HOST" in url:
         raise ProjectError("请先配置中转地址（当前为占位符 RELAY_HOST）")
     # 支持 {cmd} 占位符：把指令名注入 URL，避免只能硬编码单条指令
     # （iStoreOS 的 CGI API 形如 ?cmd=状态，不同指令需不同参数）
     if "{cmd}" in url:
-        from urllib.parse import quote
-
-        url = url.replace("{cmd}", quote(command or ""))
+        # 注意：这里不做 quote —— 实测 iStoreOS 的 CGI 不解码 %XX，
+        # 编码后会被当成指令名本身；直接放中文，由 _raw_get_utf8 以原始字节发送
+        url = url.replace("{cmd}", command or "")
     try:
-        resp = httpx.get(url, timeout=timeout, follow_redirects=True)
-        text = resp.text[:4000]
+        text = _raw_get_utf8(url, timeout=timeout)[:4000]
         # JSON 接口优先取 result 字段（iStoreOS 返回 {"ok":..,"result":".."}）
         try:
             import json as _json
@@ -129,7 +185,7 @@ def _read_http(url: str, command: str = "", timeout: int = 8) -> str:
                 return f"接口返回错误: {data.get('err', '未知')}"
         except Exception:
             pass
-        return f"HTTP {resp.status_code}\n{_redact(text[:2000])}"
+        return _redact(text[:2000])
     except Exception as exc:  # noqa: BLE001
         raise ProjectError(f"请求失败: {exc}") from exc
 
