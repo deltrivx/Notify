@@ -181,6 +181,10 @@ async def api_projects_add(request: Request):
         "source_path": str(form.get("source_path", "")).strip(),
         "commands": {"状态": "查询", "帮助": "列出指令"},
     }
+    # 项目级 token（可选，覆盖全局）
+    ptok = str(form.get("token", "")).strip()
+    if ptok:
+        project["token"] = ptok
     port = str(form.get("port", "")).strip()
     project["port"] = int(port) if port.isdigit() else None
 
@@ -193,7 +197,8 @@ async def api_projects_add(request: Request):
     config_store.save(c)
 
     # 立即尝试拉起该项目的指令服务
-    start_project_server(project, c.get("global", {}).get("relay_push_token", ""))
+    token = str(project.get("token") or c.get("global", {}).get("relay_push_token", ""))
+    start_project_server(project, token)
     return {"ok": True, "project": name}
 
 
@@ -248,7 +253,7 @@ async def api_notify(request: Request):
 
 def bootstrap() -> None:
     c = cfg()
-    token = str(c.get("global", {}).get("relay_push_token", "") or "")
+    gtoken = str(c.get("global", {}).get("relay_push_token", "") or "")
     enabled = bool(c.get("global", {}).get("enable_cmd", True))
     if not enabled:
         print("[notify] 交互总开关关闭，不起项目指令服务", flush=True)
@@ -261,6 +266,8 @@ def bootstrap() -> None:
                 flush=True,
             )
             continue
+        # 项目级 token 覆盖全局（不同项目可能用不同令牌）
+        token = str(project.get("token") or gtoken)
         start_project_server(project, token)
 
 
