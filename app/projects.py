@@ -91,8 +91,10 @@ def _run_custom_sql(path: str, spec: Any) -> str:
     try:
         uri = f"file:{path}?mode=ro"
         conn = sqlite3.connect(uri, uri=True, timeout=5)
-        rows = conn.execute(sql).fetchall()
-        cols = [d[0] for d in conn.description] if conn.description else []
+        cur = conn.execute(sql)
+        rows = cur.fetchall()
+        # description 是游标(cursor)属性，不是连接(Connection)的
+        cols = [d[0] for d in cur.description] if cur.description else []
         conn.close()
     except Exception as exc:  # noqa: BLE001
         raise ProjectError(f"查询失败: {exc}") from exc
