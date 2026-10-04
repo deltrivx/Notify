@@ -53,9 +53,15 @@ class ExecHandler(BaseHTTPRequestHandler):
         pass
 
     def _send(self, code: int, text: str):
-        body = text.encode("utf-8")
+        # VPS 侧各 cb 用 json.loads(...) 后取 result 字段。
+        # 之前直接返回纯文本(text/plain)，VPS json.loads 会抛异常 -> 走进 except，
+        # 企微最终收到的是「指令执行失败」。必须返回 JSON 才能对齐现有链路。
+        payload = json.dumps(
+            {"ok": code == 200, "result": text}, ensure_ascii=False
+        )
+        body = payload.encode("utf-8")
         self.send_response(code)
-        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
