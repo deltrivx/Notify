@@ -69,13 +69,16 @@ class ExecHandler(BaseHTTPRequestHandler):
             self._send(400, "bad request")
             return
 
-        if not constant_time_eq(str(data.get("token", "")), ExecHandler.token):
+        # 必须用 self（绑定子类注入的 token），不能引用基类 ExecHandler.token
+        # —— 基类默认是空串，会导致「正确 token 也被拒」
+        if not constant_time_eq(str(data.get("token", "")), self.token):
             self._send(403, "forbidden")
             return
 
         cmd = str(data.get("cmd", "") or "help").strip()
         try:
-            out = projects.run_query(ExecHandler.project, cmd)
+            # 同理，用 self.project 而非基类空 dict
+            out = projects.run_query(self.project, cmd)
         except Exception as exc:  # noqa: BLE001
             out = f"执行失败: {exc}"
         self._send(200, out)
