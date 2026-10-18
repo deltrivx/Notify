@@ -13,7 +13,14 @@ class MockXUIHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if "panel/api/server/status" in self.path:
-            body = json.dumps({"success": True, "obj": {"version": "3.10.2", "uptime": "10 days"}}).encode("utf-8")
+            body = json.dumps({
+                "success": True,
+                "obj": {
+                    "panelVersion": "3.10.2",
+                    "uptime": 864000,
+                    "netTraffic": {"sent": 1000000000, "recv": 2000000000}
+                }
+            }).encode("utf-8")
         elif "panel/api/inbounds/list" in self.path:
             body = json.dumps({
                 "success": True,
@@ -69,7 +76,7 @@ class TestXUI(unittest.TestCase):
         # 测试 状态
         out = projects.run_query(proj, "状态")
         self.assertIn("【3X-UI 状态】", out)
-        self.assertIn("10 days", out)
+        self.assertIn("10天", out)
 
         # 测试 流量
         out = projects.run_query(proj, "流量")
@@ -85,7 +92,9 @@ class TestXUI(unittest.TestCase):
 
         # 测试 系统流量 指令
         out = projects.run_query(proj, "系统流量")
-        self.assertIn("【VPS 系统流量】整机流量播报已停用", out)
+        self.assertIn("【VPS 系统流量】", out)
+        self.assertIn("本月已用", out)
+        self.assertIn("2.93 TB", out)
 
 
 if __name__ == "__main__":

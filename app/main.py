@@ -26,6 +26,7 @@ import config_store
 import projects
 import ui
 import wecom_crypto
+import xui_client
 
 app = FastAPI(title="Notify")
 
@@ -573,10 +574,51 @@ async def _json_or_form(request: Request) -> dict:
     return out
 
 
+_last_daily_push_date = ""
+
+
+def _traffic_scheduler_loop() -> None:
+    global _last_daily_push_date
+    while True:
+        try:
+            time.sleep(30)
+            c = cfg()
+            p_3xui = next((p for p in c.get("projects", []) if p.get("name") == "3x-ui"), None)
+            if not p_3xui:
+                continue
+
+            # 1. 后台平滑更新流量计数基准
+            try:
+                xui_client.update_traffic_stats(p_3xui)
+            except Exception:
+                pass
+
+            # 2. 每日 00:00 播报检查（00:00 ~ 00:05 且当天未推）
+            now = time.localtime()
+            today_str = time.strftime("%Y-%m-%d", now)
+            if now.tm_hour == 0 and now.tm_min <= 5 and _last_daily_push_date != today_str:
+                app_conf = _find_app_config("3x-ui")
+                corpid = c.get("global", {}).get("wecom_corpid") or app_conf.get("corpid", "")
+                secret = app_conf.get("secret", "")
+                agentid = int(app_conf.get("agentid", 1000006))
+                proxy = c.get("global", {}).get("wecom", {}).get("proxy", "")
+                admins = str(app_conf.get("admins") or "@all").strip()
+
+                if corpid and secret and agentid:
+                    report_text = xui_client.get_sys_traffic_report(p_3xui)
+                    import asyncio
+                    asyncio.run(send_wecom_text(corpid, secret, agentid, admins, report_text, proxy))
+                    _last_daily_push_date = today_str
+                    print(f"[notify] 每日系统流量播报成功推送到 1000006 ({today_str})", flush=True)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[notify] scheduler error: {exc}", flush=True)
+
+
 def main() -> None:
     import uvicorn
 
     apply_config()
+    threading.Thread(target=_traffic_scheduler_loop, daemon=True).start()
     print(f"[notify] 管理面板监听 :{MANAGE_PORT}", flush=True)
     uvicorn.run(app, host="0.0.0.0", port=MANAGE_PORT, log_level="info")
 

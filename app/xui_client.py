@@ -4,19 +4,171 @@
 """
 from __future__ import annotations
 
+import calendar
 import json
+import os
+import threading
+import time
 import urllib.parse
 import urllib.request
 from typing import Any
 
+import config_store
+
 
 def _human_size(n: float | int | None) -> str:
+    """二进制单位（KiB/MiB/GiB），用于节点流量展示。"""
     n = float(n or 0)
     for u in ["B", "K", "M", "G", "T"]:
         if n < 1024:
             return f"{n:.2f}{u}"
         n /= 1024
     return f"{n:.2f}P"
+
+
+def _human_decimal(n: float | int | None) -> str:
+    """十进制单位，与运营商口径一致（KB/MB/GB/TB），用于系统整机套餐统计。"""
+    n = float(n or 0)
+    for u in ["B", "KB", "MB", "GB", "TB"]:
+        if n < 1000:
+            return f"{n:.2f} {u}"
+        n /= 1000
+    return f"{n:.2f} PB"
+
+
+_baseline_lock = threading.Lock()
+
+
+def _get_baseline_path() -> str:
+    base_dir = config_store.CONFIG_DIR
+    if not os.path.exists(base_dir):
+        try:
+            os.makedirs(base_dir, exist_ok=True)
+        except OSError:
+            base_dir = os.path.join(os.path.dirname(__file__), "..", "config")
+            os.makedirs(base_dir, exist_ok=True)
+    return os.path.join(base_dir, "xui_traffic_baseline.json")
+
+
+def update_traffic_stats(project: dict) -> dict:
+    """从 3X-UI REST API 获取累计流量，并更新持久化基准。"""
+    base_url = project.get("source_path", "").strip()
+    token = project.get("token", "").strip()
+    if not base_url or not token:
+        raise ValueError("3X-UI source_path or token not configured")
+
+    res = _request_api(base_url, "panel/api/server/status", token=token)
+    obj = res.get("obj") or {}
+    net = obj.get("netTraffic") or {}
+    curr_total = int(net.get("sent", 0)) + int(net.get("recv", 0))
+
+    now = time.localtime()
+    cur_month = time.strftime("%Y-%m", now)
+    cur_day = time.strftime("%Y-%m-%d", now)
+    b_path = _get_baseline_path()
+
+    with _baseline_lock:
+        data = {}
+        if os.path.exists(b_path):
+            try:
+                with open(b_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            except Exception:
+                data = {}
+
+        month_str = data.get("month_str")
+        day_str = data.get("day_str")
+        month_used = int(data.get("month_used", 0))
+        today_used = int(data.get("today_used", 0))
+        last_total = data.get("last_total")
+
+        if last_total is None:
+            # 首次初始化
+            month_used = int(project.get("initial_month_bytes") or curr_total)
+            today_used = int(project.get("initial_today_bytes") or 0)
+            last_total = curr_total
+            month_str = cur_month
+            day_str = cur_day
+        else:
+            last_total = int(last_total)
+            # 跨月重置
+            if month_str != cur_month:
+                month_used = 0
+                month_str = cur_month
+            # 跨日重置
+            if day_str != cur_day:
+                today_used = 0
+                day_str = cur_day
+
+            # 计算增量（防 VPS 重启网卡计数器清零）
+            if curr_total >= last_total:
+                delta = curr_total - last_total
+            else:
+                delta = curr_total
+
+            month_used += delta
+            today_used += delta
+            last_total = curr_total
+
+        data = {
+            "month_str": month_str,
+            "month_used": month_used,
+            "day_str": day_str,
+            "today_used": today_used,
+            "last_total": last_total,
+            "updated_at": int(time.time()),
+        }
+
+        os.makedirs(os.path.dirname(b_path), exist_ok=True)
+        tmp_path = b_path + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        try:
+            os.chmod(tmp_path, 0o600)
+        except Exception:
+            pass
+        os.replace(tmp_path, b_path)
+
+        return data
+
+
+def get_sys_traffic_report(project: dict) -> str:
+    """生成与原 sys_traffic_report.py 格式一致的系统流量播报文本。"""
+    stats = update_traffic_stats(project)
+    used = stats.get("month_used", 0)
+    today = stats.get("today_used", 0)
+
+    # 配额计算（十进制 1000^4，老脚本口径）
+    quota_tb = float(project.get("monthly_quota_tb") or 2.93)
+    quota = quota_tb * (1000 ** 4)
+    iface = str(project.get("iface") or "eth0")
+
+    now = time.localtime()
+    pct = (used / quota * 100) if quota > 0 else 0.0
+    left = max(0.0, quota - used)
+
+    dim = calendar.monthrange(now.tm_year, now.tm_mon)[1]
+    dom = now.tm_mday
+    days_left = dim - dom + 1
+    avg = used / dom if dom > 0 else used
+    proj = avg * dim
+
+    lines = [
+        f"【VPS 系统流量】{time.strftime('%Y-%m-%d')}",
+        f"网卡：{iface}",
+        f"本月已用：{_human_decimal(used)} / {_human_decimal(quota)}（{pct:.1f}%）",
+        f"剩余：{_human_decimal(left)}",
+        f"今日：{_human_decimal(today)}",
+        f"日均：{_human_decimal(avg)} ｜ 本月剩余 {days_left} 天",
+        f"预计月末：{_human_decimal(proj)}",
+    ]
+    if pct >= 90:
+        lines.append(f"⚠️ 已用 {pct:.1f}%，接近套餐上限！")
+    elif pct >= 75:
+        lines.append(f"注意：已用 {pct:.1f}%")
+    if avg * days_left > left:
+        lines.append("⚠️ 按当前日均，剩余天数内将超出套餐")
+    return "\n".join(lines)
 
 
 def _request_api(base_url: str, path: str, token: str = "", method: str = "GET", data: dict | None = None, timeout: int = 10) -> dict[str, Any]:
@@ -48,7 +200,8 @@ def query_3xui(project: dict, command: str) -> str:
         return (
             "【3X-UI 可用指令】\n"
             "• 状态 — 面板运行状态\n"
-            "• 节点流量 — 各入站代理流量\n"
+            "• 流量 — 各入站代理流量\n"
+            "• 系统流量 — VPS 网卡总流量/套餐余量\n"
             "• 面板 — 版本与入站数\n"
             "• help — 本帮助"
         )
@@ -109,8 +262,8 @@ def query_3xui(project: dict, command: str) -> str:
                 n = "?"
             return f"【3X-UI 面板】\n版本：{v_str}\n入站数量：{n}"
 
-        if cmd in ("系统流量", "sys", "vps流量"):
-            return "【VPS 系统流量】整机流量播报已停用，请使用「节点流量」查询各代理入站流量。"
+        if cmd in ("系统流量", "sys", "vps流量", "systraffic"):
+            return get_sys_traffic_report(project)
 
         if cmd in ("更新", "检测更新", "update"):
             return "【3X-UI 更新】已由 VPS 定时任务自动维护，无需手动触发。"
