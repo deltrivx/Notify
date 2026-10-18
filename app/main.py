@@ -511,7 +511,7 @@ async def api_notify(request: Request):
         app_conf = _find_app_config(target_app)
         if app_conf:
             corpid = cfg().get("global", {}).get("wecom_corpid") or app_conf.get("corpid", "")
-            secret = [密钥]"secret", "")
+            secret = app_conf.get("secret", "")
             agentid = int(app_conf.get("agentid", 0))
             proxy = cfg().get("global", {}).get("wecom", {}).get("proxy", "")
             to_user = str(body.get("touser") or app_conf.get("admins") or "@all").strip()
