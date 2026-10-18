@@ -1,8 +1,11 @@
 import base64
 import hashlib
+import os
+import sys
 import time
 import unittest
 
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "app"))
 import wecom_crypto
 
 
