@@ -66,7 +66,15 @@ def query_3xui(project: dict, command: str) -> str:
                 res = _request_api(base_url, "panel/api/server/status", token=token)
                 obj = res.get("obj") or {}
                 uptime = obj.get("uptime") or "?"
-                return f"【3X-UI 状态】\n面板：运行中\n运行时间：{uptime}"
+                if isinstance(uptime, (int, float)):
+                    days = int(uptime // 86400)
+                    hours = int((uptime % 86400) // 3600)
+                    mins = int((uptime % 3600) // 60)
+                    up_str = f"{days}天{hours}时{mins}分" if days else f"{hours}时{mins}分"
+                else:
+                    up_str = str(uptime)
+                xray_st = obj.get("xray", {}).get("state") or "running"
+                return f"【3X-UI 状态】\n面板：运行中\nXray：{xray_st}\n运行时间：{up_str}"
             except Exception:
                 # 备选：如果直接请求根目录或 API 失败，至少返回探活
                 return "【3X-UI 状态】\n面板：运行中"
@@ -90,14 +98,16 @@ def query_3xui(project: dict, command: str) -> str:
         if cmd in ("面板", "panel"):
             res = _request_api(base_url, "panel/api/server/status", token=token)
             obj = res.get("obj") or {}
-            v = obj.get("version") or "?"
+            v = obj.get("panelVersion") or obj.get("version") or "?"
+            xray_v = obj.get("xray", {}).get("version")
+            v_str = f"{v} (Xray {xray_v})" if xray_v else v
             # 获取入站数
             try:
                 ires = _request_api(base_url, "panel/api/inbounds/list", token=token)
                 n = len(ires.get("obj") or [])
             except Exception:
                 n = "?"
-            return f"【3X-UI 面板】\n版本：{v}\n入站数量：{n}"
+            return f"【3X-UI 面板】\n版本：{v_str}\n入站数量：{n}"
 
         if cmd in ("系统流量", "sys", "vps流量"):
             return "【VPS 系统流量】整机流量播报已停用，请使用「节点流量」查询各代理入站流量。"
