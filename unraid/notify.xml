@@ -1,0 +1,35 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>Notify</Name>
+  <Repository>ghcr.io/deltrivx/notify:latest</Repository>
+  <Registry>https://ghcr.io/deltrivx/notify</Registry>
+  <Network>host</Network>
+  <MyIP/>
+  <Shell>sh</Shell>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/deltrivx/Notify/issues</Support>
+  <Project>https://github.com/deltrivx/Notify</Project>
+  <Overview>Notify 是 Unraid 多项目通知与交互中枢容器。把散落的通知/交互脚本收编进一个容器：全局设置 + 按项目自由增删实例（ddns-go / allinssl / istoreos 等），不污染原容器与 Unraid 系统。数据源只读挂载，host 网络保持端口与既有 frp 隧道一致（frpc / VPS / 企微侧零改动）。所有镜像由 GitHub Actions 云端构建推送 GHCR。</Overview>
+  <Category>Tools:Utilities Productivity: AI:</Category>
+  <WebUI>http://[IP]:[PORT:8188]/</WebUI>
+  <TemplateURL>https://raw.githubusercontent.com/deltrivx/Notify/main/unraid/notify.xml</TemplateURL>
+  <Icon>https://raw.githubusercontent.com/deltrivx/Notify/main/assets/logo-512.png</Icon>
+  <ExtraParams>--restart=unless-stopped --log-opt max-size=50m --log-opt max-file=1</ExtraParams>
+  <PostArgs/>
+  <CPUset/>
+  <DateInstalled/>
+  <DonateText/>
+  <DonateLink/>
+  <Requires/>
+  <Config Name="Config Path" Target="/config" Default="/mnt/user/appdata/notify/config" Mode="rw" Description="Notify 配置目录（config.yaml：全局设置 + 项目实例）" Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/notify/config</Config>
+  <Config Name="DDNS-GO Config" Target="/data/ddns_go_config.yaml" Default="/mnt/user/appdata/ddns-go/data/.ddns_go_config.yaml" Mode="ro" Description="DDNS-GO 配置文件（只读，不写回原容器）" Type="Path" Display="always" Required="false" Mask="false">/mnt/user/appdata/ddns-go/data/.ddns_go_config.yaml</Config>
+  <Config Name="AllinSSL DB" Target="/data/allinssl.db" Default="/mnt/user/appdata/allinssl/data.db" Mode="ro" Description="AllinSSL 数据库（只读，避免与原容器争写锁）" Type="Path" Display="always" Required="false" Mask="false">/mnt/user/appdata/allinssl/data.db</Config>
+  <Config Name="Manage Port" Target="8188" Default="8188" Mode="tcp" Description="Notify 管理界面端口（全局设置 / 项目实例管理）" Type="Port" Display="always" Required="true" Mask="false">8188</Config>
+  <Config Name="DDNS-GO Cmd Port" Target="8283" Default="8283" Mode="tcp" Description="ddns-go 项目指令服务端口（与 frp 隧道 10082 对应，勿随意改动）" Type="Port" Display="always" Required="false" Mask="false">8283</Config>
+  <Config Name="AllinSSL Cmd Port" Target="8285" Default="8285" Mode="tcp" Description="allinssl 项目指令服务端口（与 frp 隧道 10085 对应）" Type="Port" Display="always" Required="false" Mask="false">8285</Config>
+  <Config Name="iStoreOS Cmd Port" Target="8286" Default="8286" Mode="tcp" Description="istoreos 项目指令服务端口（内网直连查询）" Type="Port" Display="always" Required="false" Mask="false">8286</Config>
+  <Config Name="容器时区" Target="TZ" Default="Asia/Shanghai" Mode="" Description="容器运行时区" Type="Variable" Display="always" Required="false" Mask="false">Asia/Shanghai</Config>
+  <Config Name="CONFIG_DIR" Target="CONFIG_DIR" Default="/config" Mode="" Description="容器内配置目录环境变量" Type="Variable" Display="advanced" Required="true" Mask="false">/config</Config>
+  <Config Name="DATA_DIR" Target="DATA_DIR" Default="/data" Mode="" Description="容器内数据目录环境变量" Type="Variable" Display="advanced" Required="true" Mask="false">/data</Config>
+  <Config Name="MANAGE_PORT" Target="MANAGE_PORT" Default="8188" Mode="" Description="管理界面监听端口环境变量" Type="Variable" Display="advanced" Required="false" Mask="false">8188</Config>
+</Container>

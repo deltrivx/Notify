@@ -79,6 +79,47 @@ def test_validate_rejects_bad_port():
     assert any("端口" in i for i in issues)
 
 
+def test_http_exec_mode_mock():
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    import threading
+    import json
+
+    class MockExecHandler(BaseHTTPRequestHandler):
+        def log_message(self, *args): pass
+        def do_POST(self):
+            n = int(self.headers.get("Content-Length") or 0)
+            data = json.loads(self.rfile.read(n).decode())
+            if data.get("token") != "secret123":
+                self.send_response(403)
+                self.end_headers()
+                return
+            cmd = data.get("cmd")
+            res = {"ok": True, "result": f"mock-{cmd}"}
+            body = json.dumps(res).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    srv = HTTPServer(("127.0.0.1", 0), MockExecHandler)
+    port = srv.server_port
+    th = threading.Thread(target=srv.serve_forever, daemon=True)
+    th.start()
+
+    proj = {
+        "name": "unraid",
+        "source_type": "http",
+        "source_path": f"http://127.0.0.1:{port}/exec",
+        "token": "secret123",
+        "commands": {"status": "状态查询"},
+    }
+    out = projects.run_query(proj, "status")
+    assert out == "mock-status"
+    srv.shutdown()
+    srv.server_close()
+
+
 if __name__ == "__main__":
     for name, fn in sorted(list(globals().items())):
         if name.startswith("test_") and callable(fn):
