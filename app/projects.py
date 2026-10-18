@@ -270,6 +270,12 @@ def _read_http(url: str, command: str = "", timeout: int = 8, project: dict | No
 
 def run_query(project: dict, command: str) -> str:
     """按项目配置执行一个查询类指令。"""
+    pkind = project.get("kind", "")
+    # 3X-UI 项目专用查询逻辑（原汁原味对齐 wecom_bot 格式与 help）
+    if pkind == "3x-ui":
+        import xui_client
+        return xui_client.query_3xui(project, command)
+
     commands = project.get("commands") or {}
     if command not in commands and command != "help":
         avail = "、".join(commands.keys()) or "(无)"

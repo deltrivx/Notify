@@ -490,11 +490,38 @@ async def wecom_callback_message(app_name: str, request: Request):
 
 @app.post("/notify")
 async def api_notify(request: Request):
-    """把通知转发到中转服务。占位符未替换时直接报错，避免误连。"""
+    """接收通知请求。
+    1. 若指定 app / target 指定了某个企微应用，直接推送到企微（支持 3X-UI 或 VPS 告警直推）；
+    2. 否则按既有逻辑转发到中转服务。
+    """
     try:
         body = await request.json()
     except Exception:  # noqa: BLE001
         body = {}
+
+    target_app = str(body.get("app") or body.get("project") or "").strip()
+    title = str(body.get("title", "")).strip()
+    content = str(body.get("content", "")).strip()
+    importance = str(body.get("importance", "normal")).strip()
+
+    text = f"【{title}】\n{content}" if title else content
+
+    # 如果指定了企微应用（如 app="3x-ui"），直接经由 Notify 本地的 send_wecom_text 直推企微
+    if target_app:
+        app_conf = _find_app_config(target_app)
+        if app_conf:
+            corpid = cfg().get("global", {}).get("wecom_corpid") or app_conf.get("corpid", "")
+            secret = [密钥]"secret", "")
+            agentid = int(app_conf.get("agentid", 0))
+            proxy = cfg().get("global", {}).get("wecom", {}).get("proxy", "")
+            to_user = str(body.get("touser") or app_conf.get("admins") or "@all").strip()
+            if corpid and secret and agentid:
+                try:
+                    res = await send_wecom_text(corpid, secret, agentid, to_user, text, proxy)
+                    return {"ok": res.get("errcode") == 0, "result": res}
+                except Exception as exc:  # noqa: BLE001
+                    return JSONResponse({"ok": False, "error": f"推送到企微失败: {exc}"}, status_code=502)
+
     c = cfg()
     g = c.get("global", {})
     host = str(g.get("relay_host", "")).strip()
@@ -507,9 +534,9 @@ async def api_notify(request: Request):
     token = str(g.get("relay_push_token", "")).strip()
     payload = {
         "token": token,
-        "title": str(body.get("title", "")),
-        "content": str(body.get("content", "")),
-        "importance": str(body.get("importance", "normal")),
+        "title": title,
+        "content": content,
+        "importance": importance,
     }
     url = "http://%s:%s/notify" % (host, int(g.get("relay_port", 8181)))
     try:
