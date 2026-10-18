@@ -575,10 +575,12 @@ async def _json_or_form(request: Request) -> dict:
 
 
 _last_daily_push_date = ""
+_daily_push_fail_count = 0
+_next_retry_time = 0.0
 
 
 def _traffic_scheduler_loop() -> None:
-    global _last_daily_push_date
+    global _last_daily_push_date, _daily_push_fail_count, _next_retry_time
     while True:
         try:
             time.sleep(30)
@@ -593,25 +595,45 @@ def _traffic_scheduler_loop() -> None:
             except Exception:
                 pass
 
-            # 2. 每日 00:00 播报检查（00:00 ~ 00:05 且当天未推）
+            # 2. 每日 00:00 播报检查与重试机制（当天未成功推送，且到达触发/重试窗口）
             now = time.localtime()
+            now_ts = time.time()
             today_str = time.strftime("%Y-%m-%d", now)
-            if now.tm_hour == 0 and now.tm_min <= 5 and _last_daily_push_date != today_str:
+
+            # 新的一天重置重试计数器
+            if _last_daily_push_date and _last_daily_push_date != today_str:
+                _daily_push_fail_count = 0
+                _next_retry_time = 0.0
+
+            is_scheduled_window = (now.tm_hour == 0 and now.tm_min <= 5)
+            is_retry_ready = (_daily_push_fail_count in (1, 2) and now_ts >= _next_retry_time)
+
+            if _last_daily_push_date != today_str and (is_scheduled_window or is_retry_ready):
                 app_conf = _find_app_config("3x-ui")
                 corpid = c.get("global", {}).get("wecom_corpid") or app_conf.get("corpid", "")
-                secret = app_conf.get("secret", "")
+                sec_val = app_conf.get("secret", "")
                 agentid = int(app_conf.get("agentid", 1000006))
                 proxy = c.get("global", {}).get("wecom", {}).get("proxy", "")
                 admins = str(app_conf.get("admins") or "@all").strip()
 
-                if corpid and secret and agentid:
+                if corpid and sec_val and agentid:
                     report_text = xui_client.get_sys_traffic_report(p_3xui)
                     import asyncio
-                    asyncio.run(send_wecom_text(corpid, secret, agentid, admins, report_text, proxy))
-                    _last_daily_push_date = today_str
-                    print(f"[notify] 每日系统流量播报成功推送到 1000006 ({today_str})", flush=True)
+                    res = asyncio.run(send_wecom_text(corpid, sec_val, agentid, admins, report_text, proxy))
+                    if res.get("errcode") == 0:
+                        _last_daily_push_date = today_str
+                        _daily_push_fail_count = 0
+                        _next_retry_time = 0.0
+                        print(f"[notify] 每日系统流量播报成功推送到 1000006 ({today_str})", flush=True)
+                    else:
+                        raise RuntimeError(f"企微接口返回错误: {res}")
         except Exception as exc:  # noqa: BLE001
-            print(f"[notify] scheduler error: {exc}", flush=True)
+            _daily_push_fail_count += 1
+            # 失败后每隔 10 分钟重试一次，最多重试 2 次（共尝试 3 次）
+            _next_retry_time = time.time() + 600
+            print(f"[notify] scheduler error (attempt {_daily_push_fail_count}/3): {exc}", flush=True)
+            if _daily_push_fail_count == 3:
+                print(f"[notify] 每日流量播报连续 3 次失败，今日不再自动重试: {exc}", flush=True)
 
 
 def main() -> None:
