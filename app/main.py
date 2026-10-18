@@ -12,16 +12,20 @@ from __future__ import annotations
 import json
 import os
 import threading
+import time
+import urllib.parse
+import xml.etree.ElementTree as ET
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import httpx
 import yaml
-from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi import FastAPI, Request, Response
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 
 import config_store
 import projects
 import ui
+import wecom_crypto
 
 app = FastAPI(title="Notify")
 
@@ -317,6 +321,171 @@ async def api_test(request: Request):
 async def api_reload():
     apply_config()
     return {"ok": True, "reloaded": True}
+
+
+# ────────────────────────── 企业微信出站发信 ──────────────────────────
+
+_wecom_tokens: dict = {}
+_wecom_tokens_lock = threading.Lock()
+
+
+async def get_wecom_token(corpid: str, secret: str, proxy: str = "") -> str:
+    now = time.time()
+    key = f"{corpid}:{secret}"
+    with _wecom_tokens_lock:
+        tinfo = _wecom_tokens.get(key)
+        if tinfo and tinfo.get("exp", 0) > now + 120:
+            return tinfo.get("token", "")
+
+    base_url = (proxy or "https://qyapi.weixin.qq.com").rstrip("/")
+    url = f"{base_url}/cgi-bin/gettoken?corpid={urllib.parse.quote(corpid)}&corpsecret={urllib.parse.quote(secret)}"
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        resp = await client.get(url)
+        data = resp.json()
+
+    if data.get("errcode") != 0 or not data.get("access_token"):
+        raise RuntimeError(f"gettoken 失败: {data}")
+
+    token = data["access_token"]
+    exp = now + int(data.get("expires_in", 7200))
+    with _wecom_tokens_lock:
+        _wecom_tokens[key] = {"token": token, "exp": exp}
+    return token
+
+
+async def send_wecom_text(corpid: str, secret: str, agentid: int, touser: str, text: str, proxy: str = "") -> dict:
+    token = await get_wecom_token(corpid, secret, proxy)
+    base_url = (proxy or "https://qyapi.weixin.qq.com").rstrip("/")
+    url = f"{base_url}/cgi-bin/message/send?access_token={token}"
+    payload = {
+        "touser": touser,
+        "msgtype": "text",
+        "agentid": agentid,
+        "text": {"content": text},
+    }
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        resp = await client.post(url, json=payload)
+        return resp.json()
+
+
+def _find_app_config(app_name: str) -> dict:
+    c = cfg()
+    return c.get("global", {}).get("wecom", {}).get("apps", {}).get(app_name, {})
+
+
+def _find_project_for_app(app_name: str) -> dict:
+    c = cfg()
+    for p in c.get("projects", []):
+        if p.get("app") == app_name or p.get("name") == app_name:
+            return p
+    return {}
+
+
+# ────────────────────────── 企微回调路由 ──────────────────────────
+
+
+@app.get("/cb/{app_name}")
+async def wecom_callback_verify(app_name: str, request: Request):
+    """企微接收消息 URL 验证（GET echostr）。"""
+    params = request.query_params
+    msg_signature = params.get("msg_signature", "")
+    timestamp = params.get("timestamp", "")
+    nonce = params.get("nonce", "")
+    echostr = params.get("echostr", "")
+
+    app_conf = _find_app_config(app_name)
+    token = app_conf.get("token", "")
+    aes_key = app_conf.get("aes_key", "")
+
+    if not (token and aes_key):
+        return PlainTextResponse("app not configured", status_code=404)
+
+    if not wecom_crypto.verify_signature(token, timestamp, nonce, echostr, msg_signature):
+        return PlainTextResponse("signature mismatch", status_code=403)
+
+    try:
+        plain_text, _ = wecom_crypto.decrypt_message(aes_key, echostr)
+        return PlainTextResponse(plain_text)
+    except Exception as exc:
+        return PlainTextResponse(f"decrypt failed: {exc}", status_code=400)
+
+
+@app.post("/cb/{app_name}")
+async def wecom_callback_message(app_name: str, request: Request):
+    """企微接收消息与事件回调（POST 加密 XML）。"""
+    params = request.query_params
+    msg_signature = params.get("msg_signature", "")
+    timestamp = params.get("timestamp", "")
+    nonce = params.get("nonce", "")
+
+    app_conf = _find_app_config(app_name)
+    token = app_conf.get("token", "")
+    aes_key = app_conf.get("aes_key", "")
+    corpid = cfg().get("global", {}).get("wecom_corpid") or app_conf.get("corpid", "")
+    secret = app_conf.get("secret", "")
+    agentid = int(app_conf.get("agentid", 0))
+    proxy = cfg().get("global", {}).get("wecom", {}).get("proxy", "")
+
+    if not (token and aes_key):
+        return PlainTextResponse("app not configured", status_code=404)
+
+    raw_body = await request.body()
+    try:
+        root = ET.fromstring(raw_body.decode("utf-8"))
+        encrypt_b64 = root.findtext("Encrypt") or ""
+    except Exception:
+        encrypt_b64 = ""
+
+    if not encrypt_b64:
+        return PlainTextResponse("missing Encrypt", status_code=400)
+
+    if not wecom_crypto.verify_signature(token, timestamp, nonce, encrypt_b64, msg_signature):
+        return PlainTextResponse("signature mismatch", status_code=403)
+
+    try:
+        plain_xml, _ = wecom_crypto.decrypt_message(aes_key, encrypt_b64)
+    except Exception as exc:
+        return PlainTextResponse(f"decrypt failed: {exc}", status_code=400)
+
+    # 异步处理消息并直接回给企微 success 避免超时
+    def process_and_reply(xml_str: str):
+        try:
+            mroot = ET.fromstring(xml_str)
+            from_user = (mroot.findtext("FromUserName") or "").strip()
+            msg_type = (mroot.findtext("MsgType") or "").strip()
+            content = (mroot.findtext("Content") or "").strip()
+            event = (mroot.findtext("Event") or "").strip()
+            event_key = (mroot.findtext("EventKey") or "").strip()
+
+            if msg_type == "event":
+                if event == "click":
+                    cmd = event_key or "help"
+                elif event in ("subscribe", "enter_agent"):
+                    cmd = "help"
+                else:
+                    return
+            elif msg_type == "text":
+                cmd = content
+            else:
+                return
+
+            if not from_user:
+                return
+
+            proj = _find_project_for_app(app_name)
+            if not proj:
+                out = f"未找到应用 {app_name} 关联的项目实例"
+            else:
+                out = projects.run_query(proj, cmd)
+
+            # 异步出站推回企微
+            import asyncio
+            asyncio.run(send_wecom_text(corpid, secret, agentid, from_user, out, proxy))
+        except Exception as exc:
+            print(f"[notify] callback process error: {exc}", flush=True)
+
+    threading.Thread(target=process_and_reply, args=(plain_xml,), daemon=True).start()
+    return PlainTextResponse("success")
 
 
 @app.post("/notify")

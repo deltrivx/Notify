@@ -75,17 +75,40 @@ def default_config() -> dict:
 def load() -> dict:
     with _lock:
         if not os.path.exists(CONFIG_PATH):
-            return default_config()
-        try:
-            with open(CONFIG_PATH, "r", encoding="utf-8") as fh:
-                data = yaml.safe_load(fh) or {}
-        except Exception:
-            return default_config()
-        cfg = default_config()
-        if isinstance(data.get("global"), dict):
-            cfg["global"].update(data["global"])
-        if isinstance(data.get("projects"), list):
-            cfg["projects"] = data["projects"]
+            cfg = default_config()
+        else:
+            try:
+                with open(CONFIG_PATH, "r", encoding="utf-8") as fh:
+                    data = yaml.safe_load(fh) or {}
+            except Exception:
+                data = {}
+            cfg = default_config()
+            if isinstance(data.get("global"), dict):
+                cfg["global"].update(data["global"])
+            if isinstance(data.get("projects"), list):
+                cfg["projects"] = data["projects"]
+
+        # 读取 secrets.yaml（若存在）进行凭据融合
+        sec_path = os.path.join(CONFIG_DIR, "secrets.yaml")
+        if os.path.exists(sec_path):
+            try:
+                with open(sec_path, "r", encoding="utf-8") as sfh:
+                    sdata = yaml.safe_load(sfh) or {}
+                if isinstance(sdata, dict):
+                    # 融合到 global.wecom.apps
+                    w_sec = sdata.get("wecom", {}).get("apps", {})
+                    if isinstance(w_sec, dict):
+                        g_wecom = cfg.setdefault("global", {}).setdefault("wecom", {})
+                        g_apps = g_wecom.setdefault("apps", {})
+                        for a_name, a_sec in w_sec.items():
+                            if isinstance(a_sec, dict):
+                                app_conf = g_apps.setdefault(a_name, {})
+                                for sk, sv in a_sec.items():
+                                    if sv and str(sv).strip():
+                                        app_conf[sk] = sv
+            except Exception:
+                pass
+
         return cfg
 
 

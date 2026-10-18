@@ -37,6 +37,7 @@ jobs:
           chmod +x tests/*.sh tests/*.py 2>/dev/null || true
           python3 tests/test_config_store.py
           python3 tests/test_projects.py
+          python3 tests/test_wecom_crypto.py
           bash tests/verify-static.sh
 
   build:
